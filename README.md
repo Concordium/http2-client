@@ -1,5 +1,7 @@
 # http2-client
 
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.0-4baaaa.svg)](https://github.com/Concordium/.github/blob/main/.github/CODE_OF_CONDUCT.md)
+
 An native-Haskell HTTP2 client library based on `http2` and `tls` packages.
 
 Hackage: https://hackage.haskell.org/package/http2-client .
