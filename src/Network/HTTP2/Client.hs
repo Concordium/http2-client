@@ -57,7 +57,7 @@ import qualified Data.ByteString as ByteString
 import           Data.IORef.Lifted (newIORef, atomicModifyIORef', readIORef)
 import           Data.Maybe (fromMaybe)
 import           Network.HPACK as HPACK
-import           Network.HTTP2 as HTTP2
+import           Network.HTTP2.Frame as HTTP2
 import           Network.Socket (HostName, PortNumber)
 import           Network.TLS (ClientParams)
 
@@ -282,7 +282,7 @@ type PushPromiseHandler =
 -- @ _ <- (withHttp2Stream myClient $ \stream -> StreamDefinition _ _) @
 --
 -- Please refer to 'StreamStarter' and 'StreamDefinition' for more.
-withHttp2Stream :: Http2Client -> StreamStarter a
+withHttp2Stream :: Http2Client -> forall a. StreamStarter a
 withHttp2Stream = _startStream
 
 -- | Type synonym for functions that modify flags.
