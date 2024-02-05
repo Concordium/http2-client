@@ -2,6 +2,7 @@
 {-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE PackageImports     #-}
 
 -- | This module defines a set of low-level primitives for starting an HTTP2
 -- session and interacting with a server.
@@ -54,9 +55,12 @@ import           Control.Monad (forever, void, when, forM_)
 import           Control.Monad.IO.Class (liftIO)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
+import           Data.Foldable (foldl')
 import           Data.IORef.Lifted (newIORef, atomicModifyIORef', readIORef)
 import           Data.Maybe (fromMaybe)
 import           Network.HPACK as HPACK
+import           "http2" Network.HTTP2.Client as HTTP2
+import           "http2" Network.HTTP2.Client.Internal (Settings(..))
 import           Network.HTTP2.Frame as HTTP2
 import           Network.Socket (HostName, PortNumber)
 import           Network.TLS (ClientParams)
@@ -65,6 +69,25 @@ import           Network.HTTP2.Client.Channels
 import           Network.HTTP2.Client.Dispatch
 import           Network.HTTP2.Client.Exceptions
 import           Network.HTTP2.Client.FrameConnection
+
+-- FIXME: This is taken from the http2 package, as it is not exposed in the 5.0 interface.
+-- | Updating settings.
+--
+-- >>> fromSettingsList defaultSettings [(SettingsEnablePush,0),(SettingsMaxHeaderListSize,200)]
+-- Settings {headerTableSize = 4096, enablePush = False, maxConcurrentStreams = Just 64, initialWindowSize = 262144, maxFrameSize = 16384, maxHeaderListSize = Just 200}
+{- FOURMOLU_DISABLE -}
+fromSettingsList :: Settings -> SettingsList -> Settings
+fromSettingsList settings kvs = foldl' update settings kvs
+  where
+    update def (SettingsHeaderTableSize,x)      = def { headerTableSize = x }
+    -- fixme: x should be 0 or 1
+    update def (SettingsEnablePush,x)           = def { enablePush = x > 0 }
+    update def (SettingsMaxConcurrentStreams,x) = def { maxConcurrentStreams = Just x }
+    update def (SettingsInitialWindowSize,x)    = def { initialWindowSize = x }
+    update def (SettingsMaxFrameSize,x)         = def { maxFrameSize = x }
+    update def (SettingsMaxHeaderListSize,x)    = def { maxHeaderListSize = Just x }
+    update def _                                = def
+{- FOURMOLU_ENABLE -}
 
 -- | Offers credit-based flow-control.
 --
@@ -470,7 +493,7 @@ initHttp2Client conn encoderBufSize decoderBufSize goAwayHandler fallbackHandler
                 ret <- lift $ waitSetSettingsReply handler
                 modifySettings dispatchControl
                     (\(ConnectionSettings cli srv) ->
-                        (ConnectionSettings (HTTP2.updateSettings cli settslist) srv, ()))
+                        (ConnectionSettings (fromSettingsList cli settslist) srv, ()))
                 return ret
     let _initGoaway err errStr = do
             sId <- lift $ readMaxReceivedStreamIdIO dispatch
@@ -599,14 +622,14 @@ handleRSTStep d (fh, payload) = do
     case payload of
         (RSTStreamFrame err) -> lift $ do
             chan <- fmap _streamStateEvents <$> lookupStreamState d sid
-            let msg = StreamErrorEvent fh (HTTP2.fromErrorCodeId err)
+            let msg = StreamErrorEvent fh err
             maybe (return ()) (flip writeChan msg) chan
             closeReleaseStream d sid
         _ ->
             error $ "expecting RSTFrame but got " ++ show payload
 
 dispatchFramesStep
-  :: (FrameHeader, Either HTTP2Error FramePayload)
+  :: (FrameHeader, Either FrameDecodeError FramePayload)
   -> Dispatch
   -> ClientIO ()
 dispatchFramesStep (fh,_) d = do
@@ -615,7 +638,7 @@ dispatchFramesStep (fh,_) d = do
     atomicModifyIORef' (_dispatchMaxStreamId d) (\n -> (max n sid, ()))
 
 finalizeFramesStep
-  :: (FrameHeader, Either HTTP2Error FramePayload)
+  :: (FrameHeader, Either FrameDecodeError FramePayload)
   -> Dispatch
   -> ClientIO ()
 finalizeFramesStep (fh,_) d = do
@@ -635,7 +658,7 @@ dispatchControlFramesStep windowUpdatesChan controlFrame@(fh, payload) control@(
             | not . testAck . flags $ fh -> do
                 atomicModifyIORef' _dispatchControlConnectionSettings
                                    (\(ConnectionSettings cli srv) ->
-                                      (ConnectionSettings cli (HTTP2.updateSettings srv settsList), ()))
+                                      (ConnectionSettings cli (fromSettingsList srv settsList), ()))
                 lift $ maybe (return ())
                       (_applySettings _dispatchControlHpackEncoder)
                       (lookup SettingsHeaderTableSize settsList)
@@ -697,7 +720,7 @@ data HPACKLoopDecision =
   | OpenPushPromise !StreamId !StreamId
 
 data HPACKStepResult =
-    WaitContinuation !((FrameHeader, Either HTTP2Error FramePayload) -> ClientIO HPACKStepResult)
+    WaitContinuation !((FrameHeader, Either FrameDecodeError FramePayload) -> ClientIO HPACKStepResult)
   | FailedHeaders !FrameHeader !StreamId ErrorCode
   | FinishedWithHeaders !FrameHeader !StreamId (IO HeaderList)
   | FinishedWithPushPromise !FrameHeader !StreamId !StreamId (IO HeaderList)
@@ -743,7 +766,7 @@ dispatchHPACKFramesStep (fh,fp) (DispatchHPACK{..}) =
             OpenPushPromise parentSid newSid ->
                 FinishedWithPushPromise curFh parentSid newSid (decodeHeader _dispatchHPACKDynamicTable buffer)
     go curFh _ (Left err) =
-        FailedHeaders curFh sid (HTTP2.fromErrorCodeId err)
+        FailedHeaders curFh sid err
 
 
 newIncomingFlowControl
